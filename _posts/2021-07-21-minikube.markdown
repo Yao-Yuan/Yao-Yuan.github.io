@@ -1,0 +1,31 @@
+---
+layout: post
+title:  "Minikube"
+date:   2021-07-21 16:55:00 +0200
+categories: jekyll update
+---
+
+工作中需要用到基于Kubernetes的Openshift,于是想记录一下自己学习Kubernetes的过程。今天在新装的Ubuntu20的系统里配置了一下运行minikube所需要的环境。基本上按照官方的说明来走即可。这里略微总结一下，以备以后需要，同时也复习一下Linux的使用。
+
+1. Install Docker (顺序无所谓，不安装无法运行minikube): https://docs.docker.com/engine/install/ubuntu/
+2. Install Minikube: https://minikube.sigs.k8s.io/docs/start/
+3. Install Kubectl: https://kubernetes.io/docs/tasks/tools/install-kubectl-linux/
+4. Set up Web UI: 
+    - use `kubectl describe secret -n kube-system` and copy the first token
+    - `kubectl proxy`
+    - go to http://localhost:8001/api/v1/namespaces/kubernetes-dashboard/services/https:kubernetes-dashboard:/proxy/ via token login.
+
+
+Note:
+Linux配置permanant的alias可以选择写入~/.bash_aliases
+见系统默认~/.bashrc里面的这一段
+```
+# Alias definitions.
+# You may want to put all your additions into a separate file like
+# ~/.bash_aliases, instead of adding them here directly.
+# See /usr/share/doc/bash-doc/examples in the bash-doc package.
+
+if [ -f ~/.bash_aliases ]; then
+    . ~/.bash_aliases
+fi
+```
