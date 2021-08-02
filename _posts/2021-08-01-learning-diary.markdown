@@ -1,10 +1,14 @@
 ---
 layout: post
 title:  "Learning Diary"
-date:   2021-08-01 21:58:00 +0200
+date:   2021-08-02 22:17:00 +0200
 categories: jekyll update
 ---
 想要有一个集中的地方来记录一下自己每天的学习进度，然后整理延伸的blog内容。
+
+02-Aug-2021
+用递归写了Palindrome Linked List. 太困了，明天继续研究一下用快慢指针方法。
+感觉用递归写出stack的感觉有点意思噢。
 
 01-Aug-2021
 
