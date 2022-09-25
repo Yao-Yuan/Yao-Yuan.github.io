@@ -6,6 +6,9 @@ categories: jekyll update
 ---
 想要有一个集中的地方来记录一下自己每天的学习进度，然后整理延伸的blog内容。
 
+25-Sept-2022
+这份工作果然还是挺忙碌的。希望自己更有效率，同时要合理分配工作量。Do not burn out! 要重新开始培养自己记录的习惯。
+
 02-Aug-2021
 用递归写了Palindrome Linked List. 太困了，明天继续研究一下用快慢指针方法。
 感觉用递归写出stack的感觉有点意思噢。
