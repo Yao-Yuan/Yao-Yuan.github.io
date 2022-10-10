@@ -1,3 +1,10 @@
+---
+layout: post
+title:  "Kubenetes Learning"
+date:   2022-09-25 21:02:00 +0200
+categories: jekyll update
+---
+
 打算下个月（hopefully）考一个CKA的证，看的课程貌似都是在用Linux的系统，所以打算在这里写学习笔记，和一些遇到问题的记录，方便以后记起。
 
 - install kubeadm: `sudo apt-get install kubeadm`
@@ -23,7 +30,77 @@
 - 在 kubeadm 中，Master 组件的 YAML 文件会被生成在 /etc/kubernetes/manifests 路径下。比如，kube-apiserver.yaml
 - 然后，kubeadm 就会为集群生成一个 bootstrap token。在后面，只要持有这个 token，任何一个安装了 kubelet 和 kubadm 的节点，都可以通过 kubeadm join 加入到这个集群当中。
 
-- problem： kubeadm 过于新，1.25。 要更改教程所提的kubeadm.yaml. 待研究 参考： https://kubernetes.io/docs/reference/config-api/kubeadm-config.v1beta3/
-
+- problem： kubeadm 过于新，1.25。 要更改教程所提的kubeadm.yaml. 参考： https://kubernetes.io/docs/reference/config-api/kubeadm-config.v1beta3/
+改成了以下可以用：
+    ```
+    apiVersion: kubeadm.k8s.io/v1beta3
+    kind: ClusterConfiguration
+    # controllerManager:
+    #  extraArgs:
+    #    horizontal-pod-autoscaler-use-rest-clients: "true"
+    #    horizontal-pod-autoscaler-sync-period: "10s"
+    #    node-monitor-grace-period: "10s"
+    apiServer:
+    extraArgs:
+        runtime-config: "api/all=true"
+    kubernetesVersion: "v1.25.0"
+    ```
 
 - rerun `sudo kubeadm init` will give error of `FileAvailablexxxxxxx`, 可以用`sudo kubeadm reset` 再重试。
+
+- 记录下 kubeadm join 192.168.0.14:6443 --token xxxx 这个提示的命令后 运行 `kubectl get pods` 运行有问题
+`Unable to connect to the server: x509: certificate signed by unknown authority (possibly because of "crypto/rsa: verification error" while trying to verify candidate authority certificate "kubernetes")`
+发现原来是提示的暴露kubeconfig的命令没有认真打。
+```
+kubectl get nodes
+NAME          STATUS     ROLES           AGE     VERSION
+yuan-studio   NotReady   control-plane   7m28s   v1.25.1
+```
+不知道为什么node的名字不是master而是用户名，之后更熟练了之后再来更改。
+
+- 此时node处在NotReady的状态，通过用kubectl describe node xxx得知
+`KubeletNotReady              container runtime network not ready: NetworkReady=false reason:NetworkPluginNotReady message:Network plugin returns error: cni plugin not initialized`
+
+- 可以通过 kubectl 检查这个节点上各个系统 Pod 的状态，其中，kube-system 是 Kubernetes 项目预留的系统 Pod 的工作空间（Namepsace，注意它并不是 Linux Namespace，它只是 Kubernetes 划分不同工作空间的单位）
+
+`kubectl get pods -n kube-system`
+此时kube-controller-manager-xxxx在CrashLoopBackOff 和教程所说的Pending state 不同
+发现其实是之前定义的kubeadm.yaml的问题，需要去掉controller manager的相关设置，新版本已经不支持。
+
+- 安装网络插件
+`kubectl apply -f https://github.com/weaveworks/weave/releases/download/v2.8.1/weave-daemonset-k8s.yaml`
+kubeadm join 192.168.0.14:6443 --token rp725d.jzb4ebz39vjzn1f2 \
+	--discovery-token-ca-cert-hash sha256:075cfe7fb86dc746e2def383f0e4701cf7a9867a15882685782836100a1616ce
+
+- Kubernetes 的 Worker 节点跟 Master 节点几乎是相同的，它们运行着的都是一个 kubelet 组件。唯一的区别在于，在 kubeadm init 的过程中，kubelet 启动后，Master 节点上还会自动运行 kube-apiserver、kube-scheduler、kube-controller-manger 这三个系统 Pod。
+
+部署 Worker 节点反而是最简单的，只需要两步即可完成。第一步，在所有 Worker 节点上执行“安装 kubeadm 和 Docker”一节的所有步骤。第二步，执行部署 Master 节点时生成的 kubeadm join 指令：$ kubeadm join 10.168.0.2:6443 --token 00bwbx.uvnaa2ewjflwu1ry
+明天在另一台电脑试试
+
+- 默认情况下 Master 节点是不允许运行用户 Pod 的。而 Kubernetes 做到这一点，依靠的是 Kubernetes 的 Taint/Toleration 机制。它的原理非常简单：一旦某个节点被加上了一个 Taint，即被“打上了污点”，那么所有 Pod 就都不能在这个节点上运行，因为 Kubernetes 的 Pod 都有“洁癖”。除非，有个别的 Pod 声明自己能“容忍”这个“污点”，即声明了 Toleration，它才可以在这个节点上运行。
+```
+apiVersion: v1kind: Pod...spec: tolerations: - key: "foo" operator: "Exists" effect: "NoSchedule"
+```
+
+`kubectl describe node master`
+`Taints:             node-role.kubernetes.io/control-plane:NoSchedule`
+默认master是tainted.
+
+当然，如果你就是想要一个单节点的 Kubernetes，删除这个 Taint 才是正确的选择：$ kubectl taint nodes --all node-role.kubernetes.io/master-如上所示，我们在“node-role.kubernetes.io/master”这个键后面加上了一个短横线“-”，这个格式就意味着移除所有以“node-role.kubernetes.io/master”为键的 Taint。
+实际上的taint名是 node-role.kubernetes.io/control-plane-
+node
+```
+kubectl taint nodes --all node-role.kubernetes.io/control-plane-
+node/yuan-studio untainted
+```
+安装dashboard
+`https://raw.githubusercontent.com/kubernetes/dashboard/v2.7.0/aio/deploy/recommended.yaml`
+后生成一个新的namespace `kubernetes-dashboard` 
+```
+kubectl get pods -n kubernetes-dashboard
+NAME                                         READY   STATUS    RESTARTS   AGE
+dashboard-metrics-scraper-64bcc67c9c-z2ktq   1/1     Running   0          53s
+kubernetes-dashboard-5c8bd6b59-6bq84         1/1     Running   0          53s
+```
+kubeadm join 192.168.0.14:6443 --token rp725d.jzb4ebz39vjzn1f2 \
+	--discovery-token-ca-cert-hash sha256:075cfe7fb86dc746e2def383f0e4701cf7a9867a15882685782836100a1616ce
