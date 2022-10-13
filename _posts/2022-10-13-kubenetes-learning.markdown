@@ -1,7 +1,7 @@
 ---
 layout: post
 title:  "Kubenetes Learning"
-date:   2022-09-25 21:02:00 +0200
+date:   2022-10-13 21:02:00 +0200
 categories: jekyll update
 ---
 
@@ -102,5 +102,62 @@ NAME                                         READY   STATUS    RESTARTS   AGE
 dashboard-metrics-scraper-64bcc67c9c-z2ktq   1/1     Running   0          53s
 kubernetes-dashboard-5c8bd6b59-6bq84         1/1     Running   0          53s
 ```
+
+
 kubeadm join 192.168.0.14:6443 --token rp725d.jzb4ebz39vjzn1f2 \
 	--discovery-token-ca-cert-hash sha256:075cfe7fb86dc746e2def383f0e4701cf7a9867a15882685782836100a1616ce
+
+可是，如果你在某一台机器上启动的一个容器，显然无法看到其他机器上的容器在它们的数据卷里写入的文件。这是容器最典型的特征之一：无状态。而容器的持久化存储，就是用来保存容器存储状态的重要手段：存储插件会在容器里挂载一个基于网络或者其他机制的远程数据卷，使得在容器里创建的文件，实际上是保存在远程存储服务器上，或者以分布式的方式保存在多个节点上，而与当前宿主机没有任何绑定关系。这样，无论你在其他哪个宿主机上启动新的容器，都可以请求挂载指定的持久化存储卷，从而访问到数据卷里保存的内容。这就是“持久化”的含义。
+
+使用rook 没有成功，最新的common.yaml报错，之后再尝试。
+`kubectl apply -f https://raw.githubusercontent.com/rook/rook/master/cluster/examples/kubernetes/ceph/common.yaml`
+
+- 使用一种 API 对象（Deployment）管理另一种 API 对象（Pod）的方法，在 Kubernetes 中，叫作“控制器”模式（controller pattern）。在我们的例子中，Deployment 扮演的正是 Pod 的控制器的角色。
+
+- 每一个 API 对象都有一个叫作 Metadata 的字段，这个字段就是 API 对象的“标识”，即元数据，它也是我们从 Kubernetes 里找到这个对象的主要依据。这其中最主要使用到的字段是 Labels。顾名思义，Labels 就是一组 key-value 格式的标签。而像 Deployment 这样的控制器对象，就可以通过这个 Labels 字段从 Kubernetes 中过滤出它所关心的被控制对象。
+
+还有一个与 Labels 格式、层级完全相同的字段叫 Annotations，它专门用来携带 key-value 格式的内部信息。所谓内部信息，指的是对这些信息感兴趣的，是 Kubernetes 组件本身，而不是用户。所以大多数 Annotations，都是在 Kubernetes 运行过程中，被自动加在这个 API 对象上。
+
+一个 Kubernetes 的 API 对象的定义，大多可以分为 Metadata 和 Spec 两个部分。前者存放的是这个对象的元数据，对所有 API 对象来说，这一部分的字段和格式基本上是一样的；而后者存放的，则是属于这个对象独有的定义，用来描述它所要表达的功能。
+
+```
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-deployment
+spec:
+  selector:
+    matchLabels:
+      app: nginx
+  replicas: 2
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:1.7.9
+        ports:
+        - containerPort: 80
+```
+
+then do `kubectl create -f nginx-deployment.yaml`.
+在命令行中，所有 key-value 格式的参数，都使用“=”而非“:”表示。
+`kubectl get pods -l app=nginx` 
+
+可以使用 kubectl describe 命令，查看一个 API 对象的细节
+`kubectl describe pod nginx-deployment-67594d6bf6-9gdvr`
+
+推荐使用 `kubectl apply -f xxxxx.yaml`
+
+```
+spec: selector: matchLabels: app: nginx replicas: 2 template: metadata: labels: app: nginx spec: containers: - name: nginx image: nginx:1.8 ports: - containerPort: 80 volumeMounts: - mountPath: "/usr/share/nginx/html" name: nginx-vol volumes: - name: nginx-vol emptyDir: {}
+```
+`emptyDir`不显式声明宿主机目录的 Volume。所以，Kubernetes 也会在宿主机上创建一个临时目录，这个目录将来就会被绑定挂载到容器所声明的 Volume 目录上。
+
+Kubernetes 也提供了显式的 Volume 定义，它叫作 hostPath。比如下面的这个 YAML 文件： ... volumes: - name: nginx-vol hostPath: path: " /var/data"这样，容器 Volume 挂载的宿主机目录，就变成了 /var/data。
+
+`kubectl exec -it nginx-deployment-5c678cfb6d-lg9lw -- /bin/bash`
+`kubectl delete -f nginx-deployment.yaml`
