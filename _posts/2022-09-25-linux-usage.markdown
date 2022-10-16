@@ -9,3 +9,4 @@ categories: jekyll update
 
 - 输入法 切换: ctrl + space
 - 默认程序打开文件： xdg-open ./filename
+- `pstree -g` 查看正在运行的进程树

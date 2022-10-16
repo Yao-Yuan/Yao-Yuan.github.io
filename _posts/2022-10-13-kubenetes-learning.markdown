@@ -161,3 +161,245 @@ Kubernetes 也提供了显式的 Volume 定义，它叫作 hostPath。比如下�
 
 `kubectl exec -it nginx-deployment-5c678cfb6d-lg9lw -- /bin/bash`
 `kubectl delete -f nginx-deployment.yaml`
+
+- POD
+  - 由于容器永远只能管理一个进程。而当有不同进程之间有紧密关系，例如需要共享资源时，是一个难解决的问题。而Kubenetes通过定义最小单位是pod可以很好的解决这个问题，让用户把有强关联的容器部署在同一个pod里，这样很好的解决了资源共享等问题。对于pod中的容器A和B来说：
+    - 它们可以直接使用 localhost 进行通信；
+    - 它们看到的网络设备跟 Infra 容器看到的完全一样；
+    - 一个 Pod 只有一个 IP 地址，也就是这个 Pod 的 Network Namespace 对应的 IP 地址；
+    - 当然，其他的所有网络资源，都是一个 Pod 一份，并且被该 Pod 中的所有容器共享；
+    - Pod 的生命周期只跟 Infra 容器一致，而与容器 A 和 B 无关。
+    其中infra容器永远是在pod中被第一个创建的中间容器，而其他用户的定义容器，则通过join network namespace的方式，与Infra容器关联在一起。
+  - 当我们想在一个容器跑多个功能不相关的应用时，应优先考虑是不是应为一个Pod里的多个容器。
+    - 例如war包和web服务器，可以用一个Init container来负责copy war包到一个共享的volume里。
+    - 例如容器的日志收集也可以放在一个container专门去做。
+    - 如上两个例子均为sidecar的设计模式
+  - 在 Pod 中，所有 Init Container 定义的容器，都会比 spec.containers 定义的用户容器先启动。并且，Init Container 容器会按顺序逐一启动，而直到它们都启动并且退出了，用户容器才会启动。
+  - 可以把整个虚拟机想象成为一个 Pod，把这些进程分别做成容器镜像，把有顺序关系的容器，定义为 Init Container。这才是更加合理的、松耦合的容器编排诀窍，也是从传统应用架构，到“微服务架构”最自然的过渡方式。
+  - Pod中重要的字段含义与用法
+    1. NodeSelector: 将pod与node绑定的字段
+      ```
+      apiVersion: v1
+      kind: Pod
+      ...
+      spec:
+      nodeSelector:
+        disktype: ssd #表示这个pod只运行在有disktype:ssd标签（label）的node上
+      ```
+    2. NodeName: 一旦这个字段被赋值，kubenetes会认为这个pod已经被调度，一般由调度器负责设置，偶尔调试或者测试的时候用户可以设置来‘欺骗’调度器
+    3. HostAliases:定义Pod的Hosts文件（e.t. /etc/hosts）
+      ```
+      spec:  hostAliases:  
+      - ip: "10.1.2.3"    
+        hostnames:    
+        - "foo.remote"    
+        - "bar.remote"
+      ```
+      当这个Pod启动 /etc/hosts 中的内容将为：
+      ```
+      # Kubernetes-managed hosts file.
+      127.0.0.1 localhost
+      ...
+      10.244.135.10 hostaliases-pod
+      10.1.2.3 foo.remote
+      10.1.2.3 bar.remote
+      ```
+      在 Kubernetes 项目中，如果要设置 hosts 文件里的内容，一定要通过这种方法。否则，如果直接修改了 hosts 文件的话，在 Pod 被删除重建之后，kubelet 会自动覆盖掉被修改的内容。
+    凡是跟容器的 Linux Namespace 相关的属性，也一定是 Pod 级别的。这个原因也很容易理解：Pod 的设计，就是要让它里面的容器尽可能多地共享 Linux Namespace，仅保留必要的隔离和限制能力。这样，Pod 模拟出的效果，就跟虚拟机里程序间的关系非常类似了。
+    4. shareProcessNamespace=true: 意味着pod里的容器共享PID Namespace.
+        ```
+        apiVersion: v1
+        kind: Pod
+        metadata:
+          name: nginx
+        spec:
+          shareProcessNamespace: true
+          containers:
+          - name: nginx
+            image: nginx
+          - name: shell
+            image: busybox
+            stdin: true #在 Pod 的 YAML 文件里声明开启它们俩，其实等同于设置了 docker run 里的 -it（-i 即 stdin，-t 即 tty）参数。
+            tty: true
+        ```
+        创建这个pod (`kubectl create -f nginx.yaml`) 后，使用`kubectl attach -it nginx -c shell`可以在shell容器里执行ps指令。此时可以看到：
+
+        不仅可以看到它本身的 ps ax 指令，还可以看到 nginx 容器的进程，以及 Infra 容器的 /pause 进程。这就意味着，整个 Pod 里的每个容器的进程，对于所有容器来说都是可见的：它们共享了同一个 PID Namespace。
+    5. hostNetwork: true hostIPC: true hostPID: true 这些定义共享宿主机的Network, IPC 和PID Namespace. 意味着，这个Pod里的所有容器，会直接使用宿主机的网络，直接与宿主机进行IPC通信，看到宿主机里正在运行的所有进程。
+    6. pod里最重要的字段是 Containers.
+      - Init Containers: init container and container 两个字段都属于 Pod 对容器的定义，内容也完全相同，只是 Init Containers 的生命周期，会先于所有的 Containers，并且严格按照定义的顺序执行。
+      - Kubernetes 项目中对 Container 的定义，和 Docker 相比并没有什么太大区别 (e.g. Image, comamnd, workingDir, ports, volumnMounts)
+      - ImagePullPolicy: 定义镜像拉取策略。默认值always即每次创建Pod都重新拉去一次镜像，另外，当容器的镜像是类似于 nginx 或者 nginx:latest 这样的名字时，ImagePullPolicy 也会被认为 Always。若定义为Never或者IfNotPresent,则意味着Pod永远不会主动拉取这个镜像，或者只在宿主机不存在这个镜像时才拉取。
+      - Lifecycle: 
+        ```
+        apiVersion: v1
+        kind: Pod
+        metadata:
+          name: lifecycle-demo
+        spec:
+          containers:
+          - name: lifecycle-demo-container
+            image: nginx
+            lifecycle:
+              postStart:
+                exec:
+                  command: ["/bin/sh", "-c", "echo Hello from the postStart handler > /usr/share/message"]
+              preStop:
+                exec:
+                  command: ["/usr/sbin/nginx","-s","quit"]`
+          ```
+          - postStart: 在容器启动后立刻执行一个操作，但不严格保证顺序。也就是说，在postStart启动时，Entrypoint有可能还没有结束。如果 postStart 执行超时或者错误，Kubernetes 会在该 Pod 的 Events 中报出该容器启动失败的错误信息，导致 Pod 也处于失败的状态。
+    - Pod 生命周期的变化，主要体现在 Pod API 对象的 Status 部分，这是它除了 Metadata 和 Spec 之外的第三个重要字段。其中，pod.status.phase，就是 Pod 的当前状态，它有如下几种可能的情况：
+      - Pending。这个状态意味着，Pod 的 YAML 文件已经提交给了 Kubernetes，API 对象已经被创建并保存在 Etcd 当中。但是，这个 Pod 里有些容器因为某种原因而不能被顺利创建。比如，调度不成功。
+      - Running。这个状态下，Pod 已经调度成功，跟一个具体的节点绑定。它包含的容器都已经创建成功，并且至少有一个正在运行中。
+      - Succeeded。这个状态意味着，Pod 里的所有容器都正常运行完毕，并且已经退出了。这种情况在运行一次性任务时最为常见。
+      - Failed。这个状态下，Pod 里至少有一个容器以不正常的状态（非 0 的返回码）退出。这个状态的出现，意味着你得想办法 Debug 这个容器的应用，比如查看 Pod 的 Events 和日志。
+      - Unknown。这是一个异常状态，意味着 Pod 的状态不能持续地被 kubelet 汇报给 kube-apiserver，这很有可能是主从节点（Master 和 Kubelet）间的通信出现了问题。
+      - 更进一步地，Pod 对象的 Status 字段，还可以再细分出一组 Conditions。这些细分状态的值包括：PodScheduled、Ready、Initialized，以及 Unschedulable。它们主要用于描述造成当前 Status 的具体原因是什么。比如，Pod 当前的 Status 是 Pending，对应的 Condition 是 Unschedulable，这就意味着它的调度出现了问题。而其中，Ready 这个细分状态非常值得我们关注：它意味着 Pod 不仅已经正常启动（Running 状态），而且已经可以对外提供服务了。这两者之间（Running 和 Ready）是有区别的，你不妨仔细思考一下。
+    - 全部字段见：https://github.com/kubernetes/api/blob/master/core/v1/types.go
+
+  - Projected Volume. 一种特殊的Volume, 存在的意义不是为了存放数据，也不是用来进行容器和宿主机的数据交换。是为了给容器提供预先定义好的数据。Kubernetes支持一下四种
+    1. Secret. 把 Pod 想要访问的加密数据，存放到 Etcd 中。然后，你就可以通过在 Pod 的容器里挂载 Volume 的方式，访问到这些 Secret 里保存的信息了。
+      - 例子：
+      ```
+      apiVersion: v1
+      kind: Pod
+      metadata:
+        name: test-projected-volume 
+      spec:
+        containers:
+        - name: test-secret-volume
+          image: busybox
+          args:
+          - sleep
+          - "86400"
+          volumeMounts:
+          - name: mysql-cred
+            mountPath: "/projected-volume"
+            readOnly: true
+        volumes:
+        - name: mysql-cred
+          projected:
+            sources:
+            - secret:
+                name: user
+            - secret:
+                name: pass
+        ```
+      - 可以通过`kubectl create secret generic secret-key --from-file=./secret-file.txt`来定义secret。也可以通过（更常用）通过定义Secret yaml file 例如：
+        ```
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          name: mysecret
+        type: Opaque
+        data:
+          user: YWRtaW4=
+          pass: MWYyZDFlMmU2N2Rm
+        ```
+        注意此时创建出来的Secret对象只有一个， 但data字段定义了两份Secret数据，此时挂载的secret的名字，是mysecret。但如果进入pod里查看（路径为 /projected-volume里）,会有user and pass两个密码文件。
+      - Secret 对象要求这些数据必须是经过 Base64 转码的，以免出现明文密码的安全隐患。在真正的生产环境中，你需要在 Kubernetes 中开启 Secret 的加密插件，增强数据的安全性
+      - 像这样通过挂载方式进入到容器里的 Secret，一旦其对应的 Etcd 里的数据被更新，这些 Volume 里的文件内容，同样也会被更新。其实，这是 kubelet 组件在定时维护这些 Volume。需要注意的是，这个更新可能会有一定的延时。所以在编写应用程序时，在发起数据库连接的代码处写好重试和超时的逻辑，绝对是个好习惯。
+    2. ConfigMap. 与Secret相似，区别是其保存的是不需要加密的、应用所需的配置信息。用法与Secret几乎完全相同。可以用`kubectl create configmap`从文件或者目录创建`ConfigMap`,也可以直接编写 yaml 文件。
+      例如：
+      ```
+      # .properties文件的内容
+      $ cat example/ui.properties
+      color.good=purple
+      color.bad=yellow
+      allow.textmode=true
+      how.nice.to.look=fairlyNice
+
+      # 从.properties文件创建ConfigMap
+      $ kubectl create configmap ui-config --from-file=example/ui.properties
+
+      # 查看这个ConfigMap里保存的信息(data)
+      $ kubectl get configmaps ui-config -o yaml #kubectl get -o yaml 这样的参数，会将指定的 Pod API 对象以 YAML 的方式展示出来。
+      apiVersion: v1
+      data:
+        ui.properties: |
+          color.good=purple
+          color.bad=yellow
+          allow.textmode=true
+          how.nice.to.look=fairlyNice
+      kind: ConfigMap
+      metadata:
+        name: ui-config
+        ...
+      ```
+    3. Downward API. 让 Pod 里的容器能够直接获取到这个 Pod API 对象本身的信息。
+      ```
+      volumes:
+        - name: podinfo 
+          projected: 
+            sources: 
+            - downwardAPI: 
+                items: 
+                  - path: "labels"
+                    fieldRef: 
+                    fieldPath: metadata.labels
+      ```
+      这里Downward API Volume，声明了要暴露 Pod 的 metadata.labels 信息给容器。
+      Downward API 能够获取到的信息，一定是 Pod 里的容器进程启动之前就能够确定下来的信息。而如果你想要获取 Pod 容器运行后才会出现的信息，比如，容器进程的 PID，那就肯定不能使用 Downward API 了，而应该考虑在 Pod 里定义一个 sidecar 容器。
+    ！！！Secret、ConfigMap，以及 Downward API 这三种 Projected Volume 定义的信息，大多还可以通过环境变量的方式出现在容器里。但是，通过环境变量获取这些信息的方式，不具备自动更新的能力。所以，一般情况下，我都建议你使用 Volume 文件的方式获取这些信息。
+    4. ServiceAccountToken
+      - Service Account 对象的作用，就是 Kubernetes 系统内置的一种“服务账户”，它是 Kubernetes 进行权限分配的对象。比如，Service Account A，可以只被允许对 Kubernetes API 进行 GET 操作，而 Service Account B，则可以有 Kubernetes API 的所有操作权限。像这样的 Service Account 的授权信息和文件，实际上保存在它所绑定的一个特殊的 Secret 对象里的。这个特殊的 Secret 对象，就叫作 ServiceAccountToken。任何运行在 Kubernetes 集群上的应用，都必须使用这个 ServiceAccountToken 里保存的授权信息，也就是 Token，才可以合法地访问 API Server。
+      - 任意一个运行在 Kubernetes 集群里的 Pod，就会发现，每一个 Pod，都已经自动声明一个类型是 Secret、名为 default-token-xxxx 的 Volume (应该是版本更新后是kube-api-access-xxxx)，然后 自动挂载在每个容器的一个固定目录上。
+          e.g. describe之后有这一行：`Mounts: /var/run/secrets/kubernetes.io/serviceaccount from kube-api-access-tqtxr (ro)`
+        - 应用程序只要直接加载这些授权文件，就可以访问并操作 Kubernetes API 了。而且，如果使用的是 Kubernetes 官方的 Client 包（k8s.io/client-go）的话，它还可以自动加载这个目录下的文件，你不需要做任何配置或者编码操作。这种把 Kubernetes 客户端以容器的方式运行在集群里，然后使用 default Service Account 自动授权的方式，被称作“InClusterConfig”，也是最推荐的进行 Kubernetes API 编程的授权方式。
+      - 自动挂载默认 ServiceAccountToken 的潜在风险，Kubernetes 允许你设置默认不为 Pod 里的容器自动挂载这个 Volume。除了这个默认的 Service Account 外，我们很多时候还需要创建一些我们自己定义的 Service Account，来对应不同的权限设置。这样，我们的 Pod 里的容器就可以通过挂载这些 Service Account 对应的 ServiceAccountToken，来使用这些自定义的授权信息。
+  - 容器健康检查和回复机制
+    ```
+    apiVersion: v1
+    kind: Pod
+    metadata: 
+      labels:
+        test: liveness 
+        name: test-liveness-exec
+    spec: 
+      containers: 
+      - name: liveness 
+        image: busybox 
+        args: 
+        - /bin/sh 
+        - -c 
+        - touch /tmp/healthy; sleep 30; rm -rf /tmp/healthy; sleep 600 
+        livenessProbe: 
+          exec: 
+            command: 
+            - cat 
+            - /tmp/healthy 
+          initialDelaySeconds: 5 
+          periodSeconds: 5
+    ```
+    此pod启动三十秒后健康检查没有通过，会重启container （也就是重新创建新的container）
+    这个功能就是 Kubernetes 里的 Pod 恢复机制，也叫 restartPolicy。它是 Pod 的 Spec 部分的一个标准字段（pod.spec.restartPolicy），默认值是 Always，即：任何时候这个容器发生了异常，它一定会被重新创建。
+    但一定要强调的是，Pod 的恢复过程，永远都是发生在当前节点上，而不会跑到别的节点上去。事实上，一旦一个 Pod 与一个节点（Node）绑定，除非这个绑定发生了变化（pod.spec.node 字段被修改），否则它永远都不会离开这个节点。这也就意味着，如果这个宿主机宕机了，这个 Pod 也不会主动迁移到其他节点上去。而如果你想让 Pod 出现在其他的可用节点上，就必须使用 Deployment 这样的“控制器”来管理 Pod，哪怕你只需要一个 Pod 副本。
+    而作为用户，你还可以通过设置 restartPolicy，改变 Pod 的恢复策略。除了 Always，它还有 OnFailure 和 Never 两种情况：Always：在任何情况下，只要容器不在运行状态，就自动重启容器；OnFailure: 只在容器 异常时才自动重启容器；Never: 从来不重启容器。在实际使用时，我们需要根据应用运行的特性，合理设置这三种恢复策略。比如，一个 Pod，它只计算 1+1=2，计算完成输出结果后退出，变成 Succeeded 状态。这时，你如果再用 restartPolicy=Always 强制重启这个 Pod 的容器，就没有任何意义了。而如果你要关心这个容器退出后的上下文环境，比如容器退出后的日志、文件和目录，就需要将 restartPolicy 设置为 Never。因为一旦容器被自动重新创建，这些内容就有可能丢失掉了（被垃圾回收了）。
+    ！基本设计原理
+      1. 只要 Pod 的 restartPolicy 指定的策略允许重启异常的容器（比如：Always），那么这个 Pod 就会保持 Running 状态，并进行容器重启。否则，Pod 就会进入 Failed 状态 。
+      2. 对于包含多个容器的 Pod，只有它里面所有的容器都进入异常状态后，Pod 才会进入 Failed 状态。在此之前，Pod 都是 Running 状态。此时，Pod 的 READY 字段会显示正常容器的个数
+    livenessProbe更常用的是发起http （pod暴露一个健康检查的URL比如/healthz）或者tcp请求的方式
+    ```
+    ...
+    livenessProbe:
+        httpGet:
+          path: /healthz
+          port: 8080
+          httpHeaders:
+          - name: X-Custom-Header
+            value: Awesome
+          initialDelaySeconds: 3
+          periodSeconds: 3
+    ```
+    ```
+    ...
+    livenessProbe:
+      tcpSocket:
+        port: 8080
+      initialDelaySeconds: 15
+      periodSeconds: 20
+    ```
+    在 Kubernetes 的 Pod 中，还有一个叫 readinessProbe 的字段。虽然它的用法与 livenessProbe 类似，但作用却大不一样。readinessProbe 检查结果的成功与否，决定的这个 Pod 是不是能被通过 Service 的方式访问到，而并不影响 Pod 的生命周期。
+  - PodPreset对象. 让kubernetes自动给Pod填充字段。减少开发人员编写Pod Yaml的门槛. 已deprecate可用admission webhooks来在创建时修改Pod.
+    ```

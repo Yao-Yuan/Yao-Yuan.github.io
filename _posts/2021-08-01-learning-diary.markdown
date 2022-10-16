@@ -1,10 +1,13 @@
 ---
 layout: post
 title:  "Learning Diary"
-date:   2021-10-10 22:17:00 +0200
+date:   2021-10-16 22:17:00 +0200
 categories: jekyll update
 ---
 想要有一个集中的地方来记录一下自己每天的学习进度，然后整理延伸的blog内容。
+
+16-Oct-2022
+主要学习kubernetes pod相关内容。
 
 10-Oct-2022
 今天早上把德语B2的第一单元基本结束了。很棒！加油。
