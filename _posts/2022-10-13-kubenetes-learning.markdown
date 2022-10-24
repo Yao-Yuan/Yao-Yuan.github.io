@@ -1,7 +1,7 @@
 ---
 layout: post
 title:  "Kubenetes Learning"
-date:   2022-10-13 21:02:00 +0200
+date:   2022-10-16 21:02:00 +0200
 categories: jekyll update
 ---
 
@@ -403,3 +403,127 @@ Kubernetes 也提供了显式的 Volume 定义，它叫作 hostPath。比如下�
     在 Kubernetes 的 Pod 中，还有一个叫 readinessProbe 的字段。虽然它的用法与 livenessProbe 类似，但作用却大不一样。readinessProbe 检查结果的成功与否，决定的这个 Pod 是不是能被通过 Service 的方式访问到，而并不影响 Pod 的生命周期。
   - PodPreset对象. 让kubernetes自动给Pod填充字段。减少开发人员编写Pod Yaml的门槛. 已deprecate可用admission webhooks来在创建时修改Pod.
     ```
+- 编排 - 控制器模型
+  - 控制器模型即是用一种对象管理另外一种对象
+  - 控制循环 = 调谐循环（Reconcile Loop） = 同步循环（Sync Loop）
+  - 实现：
+    ```
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: nginx-deployment
+    spec:
+      selector:
+        matchLabels:
+          app: nginx
+      replicas: 2
+      template:
+        metadata:
+          labels:
+            app: nginx
+        spec:
+          containers:
+          - name: nginx
+            image: nginx:1.7.9
+            ports:
+            - containerPort: 80
+    ```
+    Deployment 控制器从 Etcd 中获取到所有携带了“app: nginx”标签的 Pod，然后统计它们的数量，这就是实际状态；
+    Deployment 对象的 Replicas 字段的值就是期望状态；
+    Deployment 控制器将两个状态做比较，然后根据比较结果，确定是创建 Pod，还是删除已有的 Pod 
+  - 类似 Deployment 这样的一个控制器，实际上都是由上半部分的控制器定义（包括期望状态），加上下半部分的被控制对象的模板组成的。
+  - Deployment -> ReplicaSet -> Pod
+  - `kubectl scale deployment nginx-deployment --replicas=4`
+    `kubectl get deployments`
+    Deployment 的四个状态字段
+      1. DESIRED：用户期望的 Pod 副本个数（spec.replicas 的值）；
+      2. CURRENT：当前处于 Running 状态的 Pod 的个数；
+      3. UP-TO-DATE：当前处于最新版本的 Pod 的个数，所谓最新版本指的是 Pod 的 Spec 部分与 Deployment 里 Pod 模板里定义的完全一致；
+      4. AVAILABLE：当前已经可用的 Pod 的个数，即：既是 Running 状态，又是最新版本，并且已经处于 Ready（健康检查正确）状态的 Pod 的个数。
+    `kubectl rollout status deployment/nginx-deployment`
+    `kubectl get rs` //replica set
+    ReplicaSet 的 DESIRED、CURRENT 和 READY 字段的含义，和 Deployment 中是一致的。所以，相比之下，Deployment 只是在 ReplicaSet 的基础上，添加了 UP-TO-DATE 这个跟版本有关的状态字段。
+    `kubectl edit deployment/nginx-deployment`: 把 API 对象的内容下载到了本地文件，让你修改完成后再提交上去。
+    `kubectl describe deployment nginx-deployment`
+    - 滚动更新：
+      首先，当你修改了 Deployment 里的 Pod 定义之后，Deployment Controller 会使用这个修改后的 Pod 模板，创建一个新的 ReplicaSet（hash=1764197365），这个新的 ReplicaSet 的初始 Pod 副本数是：0。然后，在 Age=24 s 的位置，Deployment Controller 开始将这个新的 ReplicaSet 所控制的 Pod 副本数从 0 个变成 1 个，即：“水平扩展”出一个副本。紧接着，在 Age=22 s 的位置，Deployment Controller 又将旧的 ReplicaSet（hash=3167673210）所控制的旧 Pod 副本数减少一个，即：“水平收缩”成两个副本。
+      ```
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: nginx-deployment
+        labels:
+          app: nginx
+      spec:
+      ...
+        strategy:
+          type: RollingUpdate
+          rollingUpdate:
+            maxSurge: 1 #除了 DESIRED 数量之外，在一次“滚动”中，Deployment 控制器还可以创建多少个新 Pod 也可以用百分比表示 e.g. maxSurge: 50%
+            maxUnavailable: 1 #在一次“滚动”中，Deployment 控制器可以删除多少个旧 Pod 也可以用百分比表示
+      ```
+    - `kubectl set image deployment/nginx-deployment nginx=nginx:1.91` 可以直接修改使用镜像
+    - 回滚：`kubectl rollout undo deployment/nginx-deployment`
+        `kubectl rollout history deployment/nginx-deployment`
+        `kubectl rollout history deployment/nginx-deployment --revision=2`
+        `kubectl rollout undo deployment/nginx-deployment --to-revision=2`
+    - 暂停deployment 同时改变deployment, 这样最后只生成一个新的ReplicaSet对象
+      `kubectl rollout pause deployment/nginx-deployment`
+      修改后 `kubectl rollout resume deployment/nginx-deployment`.避免多次修改生成多个replicaset.
+  - Service 被访问的两种方式
+    1. Virtual IP (VIP): 当访问service 的IP地址，service会把请求转发到Service代理的某一个Pod上面
+    2. DNS方式，只要访问 my-svc.my-namespace.svc.cluster.local这一条DNS记录，就可以访问到名叫my-svc的Service所代理的某一个pod。
+      - 处理方式1：访问这一条dns时，解析到的其实是service的VIP
+      - 处理方式2：headless service. 访问这一条记录时，直接解析的是service代理的某一个pod的IP地址。
+  - Kubenetes 对“有状态应用”的支持 - StatefulSet
+    - 先定义一个headless service:
+    ```
+    apiVersion: v1
+    kind: Service
+    metadata:
+      name: nginx
+      labels:
+        app: nginx
+    spec:
+      ports:
+      - port: 80
+        name: web
+      clusterIP: None # 代表这个service 没有VIP，为headless service
+      selector:
+        app: nginx
+    ```
+    此headless service 的dns为： <pod-name>.<svc-name>.<namespace>.svc.cluster.local
+    再创建一个StatefulSet
+    ```
+    apiVersion: apps/v1
+    kind: StatefulSet
+    metadata:
+      name: web
+    spec:
+      serviceName: "nginx" #和nginx-deployment 的唯一区别
+      replicas: 2
+      selector:
+        matchLabels:
+          app: nginx
+      template:
+        metadata:
+          labels:
+            app: nginx
+        spec:
+          containers:
+          - name: nginx
+            image: nginx:1.9.1
+            ports:
+            - containerPort: 80
+              name: web
+    ```
+    然后：
+    `kubectl get service nginx`
+    `kubectl get statefulset web`
+    `kubectl get pods -w -l app=nginx`
+  StatefulSet 给它所管理的所有 Pod 的名字，进行了编号，编号规则是：<statefulset name>-<index>
+  也就是会创建web-0 and web-1
+  `kubectl run -i --tty --image busybox:1.28.4 dns-test --restart=Never --rm /bin/sh `
+  这个命令可以创建一个一次性的pod (--rm) 但是发现退出时，这个pod暂停运行，进入Error state. 并没有马上被删除
+  然后在这个pod里面可以用`nslookup web-0.nginx` 然后发现可以解析正确的pod ip address. 就算删除这两个Pod 新的Pod被创建，ip地址也能够通过这个名字被解析到。
+
