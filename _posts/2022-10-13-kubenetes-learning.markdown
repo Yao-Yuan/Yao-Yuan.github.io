@@ -527,3 +527,63 @@ Kubernetes 也提供了显式的 Volume 定义，它叫作 hostPath。比如下�
   这个命令可以创建一个一次性的pod (--rm) 但是发现退出时，这个pod暂停运行，进入Error state. 并没有马上被删除
   然后在这个pod里面可以用`nslookup web-0.nginx` 然后发现可以解析正确的pod ip address. 就算删除这两个Pod 新的Pod被创建，ip地址也能够通过这个名字被解析到。
 
+- Stateful Set 的存储状态
+  - 定义PVC（persistent volume claim）
+  ```
+  kind: PersistentVolumeClaim
+  apiVersion: v1
+  metadata:
+    name: pv-claim
+  spec:
+    accessModes:
+    - ReadWriteOnce
+    resources:
+      requests:
+        storage: 1Gi
+  ```
+  - 声明使用PVC
+  ```
+  apiVersion: apps/v1
+  kind: StatefulSet
+  metadata:
+    name: web
+  spec:
+    serviceName: "nginx"
+    replicas: 2
+    selector:
+      matchLabels:
+        app: nginx
+    template:
+      metadata:
+        labels:
+          app: nginx
+      spec:
+        containers:
+        - name: nginx
+          image: nginx:1.9.1
+          ports:
+          - containerPort: 80
+            name: web
+          volumeMounts:
+          - name: www
+            mountPath: /usr/share/nginx/html
+    volumeClaimTemplates:
+    - metadata:
+        name: www
+      spec:
+        accessModes:
+        - ReadWriteOnce
+        resources:
+          requests:
+            storage: 1Gi
+    ```
+    凡是被这个 StatefulSet 管理的 Pod，都会声明一个对应的 PVC；而这个 PVC 的定义，就来自于 volumeClaimTemplates 这个模板字段。更重要的是，这个 PVC 的名字，会被分配一个与这个 Pod 完全一致的编号。
+
+    PVC 其实就是一种特殊的 Volume。只不过一个 PVC 具体是什么类型的 Volume，要在跟某个 PV 绑定之后才知道。关于 PV、PVC 更详细的知识，我会在容器存储部分做进一步解读。当然，PVC 与 PV 的绑定得以实现的前提是，运维人员已经在系统里创建好了符合条件的 PV（比如，我们在前面用到的 pv-volume）；或者，你的 Kubernetes 集群运行在公有云上，这样 Kubernetes 就会通过 Dynamic Provisioning 的方式，自动为你创建与 PVC 匹配的 PV。
+
+    `for i in 0 1; do kubectl exec web-$i -- sh -c 'echo hello $(hostname) > /usr/share/nginx/html/index.html'; done` 在Pod的volume目录里写入一个文件 - 此处无法测试，本地没有PV
+
+    *  如果删除这两个pod， 新的pod创建后，会自动对应到这两个volume
+    在这个新的 Pod 对象的定义里，它声明使用的 PVC 的名字，还是叫作：www-web-0。这个 PVC 的定义，还是来自于 PVC 模板（volumeClaimTemplates），这是 StatefulSet 创建 Pod 的标准流程。所以，在这个新的 web-0 Pod 被创建出来之后，Kubernetes 为它查找名叫 www-web-0 的 PVC 时，就会直接找到旧 Pod 遗留下来的同名的 PVC，进而找到跟这个 PVC 绑定在一起的 PV。这样，新的 Pod 就可以挂载到旧 Pod 对应的那个 Volume，并且获取到保存在 Volume 里的数据。
+  - 一个虽然复杂但是很好用来理解stateful set的实例：https://kubernetes.io/docs/tasks/run-application/run-replicated-stateful-application/#statefulset
+
