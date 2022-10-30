@@ -587,3 +587,220 @@ Kubernetes 也提供了显式的 Volume 定义，它叫作 hostPath。比如下�
     在这个新的 Pod 对象的定义里，它声明使用的 PVC 的名字，还是叫作：www-web-0。这个 PVC 的定义，还是来自于 PVC 模板（volumeClaimTemplates），这是 StatefulSet 创建 Pod 的标准流程。所以，在这个新的 web-0 Pod 被创建出来之后，Kubernetes 为它查找名叫 www-web-0 的 PVC 时，就会直接找到旧 Pod 遗留下来的同名的 PVC，进而找到跟这个 PVC 绑定在一起的 PV。这样，新的 Pod 就可以挂载到旧 Pod 对应的那个 Volume，并且获取到保存在 Volume 里的数据。
   - 一个虽然复杂但是很好用来理解stateful set的实例：https://kubernetes.io/docs/tasks/run-application/run-replicated-stateful-application/#statefulset
 
+
+    - patch rolling update: `kubectl patch statefulset mysql -p '{"spec":{"updateStrategy":{"type":"RollingUpdate","rollingUpdate":{"partition":2}}}}` 表示当pod魔板发生变化时，只有序号大于或者等于2的pod会被更新。
+  
+- DaemonSet 
+  - 主要作用，是让你在 Kubernetes 集群里，运行一个 Daemon Pod。 所以，这个 Pod 有如下三个特征：这个 Pod 运行在 Kubernetes 集群里的每一个节点（Node）上；每个节点上只有一个这样的 Pod 实例；当有新的节点加入 Kubernetes 集群后，该 Pod 会自动地在新节点上被创建出来；而当旧节点被删除后，它上面的 Pod 也相应地会被回收掉。
+  - 使用例子： 各种网络插件的 Agent 组件，都必须运行在每一个节点上，用来处理这个节点上的容器网络；各种存储插件的 Agent 组件，也必须运行在每一个节点上，用来在这个节点上挂载远程存储目录，操作容器的 Volume 目录；各种监控组件和日志组件，也必须运行在每一个节点上，负责这个节点上的监控信息和日志搜集。
+  - 更重要的是，跟其他编排对象不一样，DaemonSet 开始运行的时机，很多时候比整个 Kubernetes 集群出现的时机都要早。
+  - ```
+
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fluentd-elasticsearch
+  namespace: kube-system
+  labels:
+    k8s-app: fluentd-logging
+spec:
+  selector:
+    matchLabels:
+      name: fluentd-elasticsearch
+  template:
+    metadata:
+      labels:
+        name: fluentd-elasticsearch
+    spec:
+      tolerations:
+      - key: node-role.kubernetes.io/master
+        effect: NoSchedule
+      containers:
+      - name: fluentd-elasticsearch
+        image: k8s.gcr.io/fluentd-elasticsearch:1.20
+        resources:
+          limits:
+            memory: 200Mi
+          requests:
+            cpu: 100m
+            memory: 200Mi
+        volumeMounts:
+        - name: varlog
+          mountPath: /var/log
+        - name: varlibdockercontainers
+          mountPath: /var/lib/docker/containers
+          readOnly: true
+      terminationGracePeriodSeconds: 30
+      volumes:
+      - name: varlog
+        hostPath:
+          path: /var/log
+      - name: varlibdockercontainers
+        hostPath:
+          path: /var/lib/docker/containers
+  ```
+  DaemonSet 跟 Deployment 其实非常相似，只不过是没有 replicas 字段；它也使用 selector 选择管理所有携带了 name=fluentd-elasticsearch 标签的 Pod。
+  - 在指定Node上创建新的Pod
+    可以用NodeSelector,但多用一个更新，功能更完善的字段nodeAffinity来代替。e.g.
+    ```
+
+    apiVersion: v1
+    kind: Pod
+    metadata:
+      name: with-node-affinity
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution: #这个 nodeAffinity 必须在每次调度的时候予以考虑。同时，这也意味着你可以设置在某些情况下不考虑这个 nodeAffinity；
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: metadata.name
+                operator: In
+                values:
+                - node-geektime
+    ```
+    你应该注意到 nodeAffinity 的定义，可以支持更加丰富的语法，比如 operator: In（即：部分匹配；如果你定义 operator: Equal，就是完全匹配），这也正是 nodeAffinity 会取代 nodeSelector 的原因之一。
+  
+  我们的 DaemonSet Controller 会在创建 Pod 的时候，自动在这个 Pod 的 API 对象里，加上这样一个 nodeAffinity 定义。其中，需要绑定的节点名字，正是当前正在遍历的这个 Node。
+
+  DaemonSet 还会给这个 Pod 自动加上另外一个与调度相关的字段，叫作 tolerations。这个字段意味着这个 Pod，会“容忍”（Toleration）某些 Node 的“污点”（Taint）。而 DaemonSet 自动加上的 tolerations 字段，格式如下所示：
+  ```
+  apiVersion: v1
+  kind: Pod
+  metadata:
+    name: with-toleration
+  spec:
+    tolerations:
+    - key: node.kubernetes.io/unschedulable
+      operator: Exists
+      effect: NoSchedule
+  ```
+  这个 Toleration 的含义是：“容忍”所有被标记为 unschedulable“污点”的 Node；“容忍”的效果是允许调度。
+  而在正常情况下，被标记了 unschedulable“污点”的 Node，是不会有任何 Pod 被调度上去的（effect: NoSchedule）。可是，DaemonSet 自动地给被管理的 Pod 加上了这个特殊的 Toleration，就使得这些 Pod 可以忽略这个限制，继而保证每个节点上都会被调度一个 Pod。当然，如果这个节点有故障的话，这个 Pod 可能会启动失败，而 DaemonSet 则会始终尝试下去，直到 Pod 启动成功。
+  假如当前 DaemonSet 管理的，是一个网络插件的 Agent Pod，那么你就必须在这个 DaemonSet 的 YAML 文件里，给它的 Pod 模板加上一个能够“容忍”node.kubernetes.io/network-unavailable“污点”的 Toleration。
+  ```
+  ...
+  template:
+      metadata:
+        labels:
+          name: network-plugin-agent
+      spec:
+        tolerations:
+        - key: node.kubernetes.io/network-unavailable
+          operator: Exists
+          effect: NoSchedule
+  ```
+  DaemonSet 其实是一个非常简单的控制器。在它的控制循环中，只需要遍历所有节点，然后根据节点上是否有被管理 Pod 的情况，来决定是否要创建或者删除一个 Pod。只不过，在创建每个 Pod 的时候，DaemonSet 会自动给这个 Pod 加上一个 nodeAffinity，从而保证这个 Pod 只会在指定节点上启动。同时，它还会自动给这个 Pod 加上一个 Toleration，从而忽略节点的 unschedulable“污点”。当然，你也可以在 Pod 模板里加上更多种类的 Toleration，从而利用 DaemonSet 达到自己的目的。
+  - 在 DaemonSet 上，我们一般都应该加上 resources 字段，来限制它的 CPU 和内存使用，防止它占用过多的宿主机资源。
+  - `kubectl get ds -n kube-system fluentd-elasticsearch`查看集群里DaemonSet对象
+  - (Kubernetes 里比较长的 API 对象都有短名字，比如 DaemonSet 对应的是 ds，Deployment 对应的是 deploy。)
+  - `kubectl set image ds/fluentd-elasticsearch fluentd-elasticsearch=k8s.gcr.io/fluentd-elasticsearch:v2.2.0 --record -n=kube-system` 改变容器版本 (由于这一次我在升级命令后面加上了–record 参数，所以这次升级使用到的指令就会自动出现在 DaemonSet 的 rollout history 里面)
+  - `kubectl rollout history daemonset fluentd-elasticsearch -n kube-system` 查看rollout history
+  - `kubectl rollout status ds/fluentd-elasticsearch -n kube-system` 查看rollout status
+  - Kubernetes v1.7 之后添加了一个 API 对象，名叫 ControllerRevision，专门用来记录某种 Controller 对象的版本。比如，你可以通过如下命令查看 fluentd-elasticsearch 对应的 ControllerRevision： `kubectl get controllerrevision -n kube-system -l name=fluentd-elasticsearch` 
+  - `kubectl describe controllerrevision fluentd-elasticsearch-64dc6799c9 -n kube-system`
+  - `kubectl rollout undo daemonset fluentd-elasticsearch --to-revision=1 -n kube-systemdaemonset.extensions/fluentd-elasticsearch rolled back`
+  - 在 Kubernetes 项目里，ControllerRevision 其实是一个通用的版本管理对象。这样，Kubernetes 项目就巧妙地避免了每种控制器都要维护一套冗余的代码和逻辑的问题。
+- Job and CronJob
+  - Job.
+  ```
+  apiVersion: batch/v1
+  kind: Job
+  metadata:
+    name: pi
+  spec:
+    template:
+      spec:
+        containers:
+        - name: pi
+          image: resouer/ubuntu-bc 
+          command: ["sh", "-c", "echo 'scale=10000; 4*a(1)' | bc -l "]
+        restartPolicy: Never
+    backoffLimit: 4
+  ```
+    - `kubectl describe jobs/pi`
+    - 这个 Job 对象在创建后，它的 Pod 模板，被自动加上了一个 controller-uid=< 一个随机字符串 > 这样的 Label。而这个 Job 对象本身，则被自动加上了这个 Label 对应的 Selector，从而 保证了 Job 与它所管理的 Pod 之间的匹配关系。
+    - 我们需要在 Pod 模板中定义 restartPolicy=Never 的原因：离线计算的 Pod 永远都不应该被重启，否则它们会再重新计算一遍。 restartPolicy 在 Job 对象里只允许被设置为 Never 和 OnFailure；而在 Deployment 对象里，restartPolicy 则只允许被设置为 Always。
+    - 如果这个离线作业失败了要怎么办？比如，我们在这个例子中定义了 restartPolicy=Never，那么离线作业失败后 Job Controller 就会不断地尝试创建一个新 Pod. 我们就在 Job 对象的 spec.backoffLimit 字段里定义了重试次数为 4（即，backoffLimit=4），而这个字段的默认值是 6。
+    - 需要注意的是，Job Controller 重新创建 Pod 的间隔是呈指数增加的，即下一次重新创建 Pod 的动作会分别发生在 10 s、20 s、40 s …后。
+    - 如果你定义的 restartPolicy=OnFailure，那么离线作业失败后，Job Controller 就不会去尝试创建新的 Pod。但是，它会不断地尝试重启 Pod 里的容器。
+    - Job 的 API 对象里，有一个 spec.activeDeadlineSeconds 字段可以设置最长运行时间. 一旦运行超过了 100 s，这个 Job 的所有 Pod 都会被终止。并且，你可以在 Pod 的状态里看到终止的原因是 reason: DeadlineExceeded。
+    - Job 对象中，负责并行控制的参数有两个：spec.parallelism，它定义的是一个 Job 在任意时间最多可以启动多少个 Pod 同时运行；spec.completions，它定义的是 Job 至少要完成的 Pod 数目，即 Job 的最小完成数。
+    - 三种常用使用Job对象的方法
+      1. 外部管理器+job模板
+      ```
+      apiVersion: batch/v1
+      kind: Job
+      metadata:
+        name: process-item-$ITEM
+        labels:
+          jobgroup: jobexample
+      spec:
+        template:
+          metadata:
+            name: jobexample
+            labels:
+              jobgroup: jobexample
+          spec:
+            containers:
+            - name: c
+              image: busybox
+              command: ["sh", "-c", "echo Processing item $ITEM && sleep 5"]
+            restartPolicy: Never
+      ```
+      创建 Job 时，替换掉 $ITEM 这样的变量；所有来自于同一个模板的 Job，都有一个 jobgroup: jobexample 标签，也就是说这一组 Job 使用这样一个相同的标识。
+      2. 拥有固定任务书目的并行Job
+      ```
+      apiVersion: batch/v1
+      kind: Job
+      metadata:
+        name: job-wq-1
+      spec:
+        completions: 8
+        parallelism: 2
+        template:
+          metadata:
+            name: job-wq-1
+          spec:
+            containers:
+            - name: c
+              image: myrepo/job-wq-1
+              env:
+              - name: BROKER_URL
+                value: amqp://guest:guest@rabbitmq-service:5672
+              - name: QUEUE
+                value: job1
+            restartPolicy: OnFailure
+      ```
+      总共会有 8 个任务会被逐一放入工作队列里（你可以运行一个外部小程序作为生产者，来提交任务）。在这个实例中，我选择充当工作队列的是一个运行在 Kubernetes 里的 RabbitMQ。所以，我们需要在 Pod 模板里定义 BROKER_URL，来作为消费者。所以，一旦你用 kubectl create 创建了这个 Job，它就会以并发度为 2 的方式，每两个 Pod 一组，创建出 8 个 Pod。每个 Pod 都会去连接 BROKER_URL，从 RabbitMQ 里读取任务，然后各自进行处理。
+      3. 指定并行度（parallelism）, 但不设置固定的completions的值
+   - Cronjob 为定时任务
+      ```
+      apiVersion: batch/v1beta1
+      kind: CronJob
+      metadata:
+        name: hello
+      spec:
+        schedule: "*/1 * * * *"
+        jobTemplate:
+          spec:
+            template:
+              spec:
+                containers:
+                - name: hello
+                  image: busybox
+                  args:
+                  - /bin/sh
+                  - -c
+                  - date; echo Hello from the Kubernetes cluster
+                restartPolicy: OnFailure
+      ```
+      CronJob 是一个 Job 对象的控制器（Controller）
+      这个 Cron 表达式里 */1 中的 * 表示从 0 开始，/ 表示“每”，1 表示偏移量。所以，它的意思就是：从 0 开始，每 1 个时间单位执行一次。
+      Cron 表达式中的五个部分分别代表：分钟、小时、日、月、星期。
+      上面这句 Cron 表达式的意思是：从当前开始，每分钟执行一次。
+      由于定时任务的特殊性，很可能某个 Job 还没有执行完，另外一个新 Job 就产生了。这时候，你可以通过 spec.concurrencyPolicy 字段来定义具体的处理策略。比如：
+      1. concurrencyPolicy=Allow，这也是默认情况，这意味着这些 Job 可以同时存在
+      2. concurrencyPolicy=Forbid，这意味着不会创建新的 Pod，该创建周期被跳过；
+      3. concurrencyPolicy=Replace，这意味着新产生的 Job 会替换旧的、没有执行完的 Job。
+      而如果某一次 Job 创建失败，这次创建就会被标记为“miss”。当在指定的时间窗口内，miss 的数目达到 100 时，那么 CronJob 会停止再创建这个 Job。这个时间窗口，可以由 spec.startingDeadlineSeconds 字段指定。比如 startingDeadlineSeconds=200，意味着在过去 200 s 里，如果 miss 的数目达到了 100 次，那么这个 Job 就不会被创建执行了。
