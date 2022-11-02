@@ -804,3 +804,108 @@ spec:
       2. concurrencyPolicy=Forbid，这意味着不会创建新的 Pod，该创建周期被跳过；
       3. concurrencyPolicy=Replace，这意味着新产生的 Job 会替换旧的、没有执行完的 Job。
       而如果某一次 Job 创建失败，这次创建就会被标记为“miss”。当在指定的时间窗口内，miss 的数目达到 100 时，那么 CronJob 会停止再创建这个 Job。这个时间窗口，可以由 spec.startingDeadlineSeconds 字段指定。比如 startingDeadlineSeconds=200，意味着在过去 200 s 里，如果 miss 的数目达到了 100 次，那么这个 Job 就不会被创建执行了。
+
+- 声明式API
+  - kubectl replace 的执行过程，是使用新的 YAML 文件中的 API 对象，替换原有的 API 对象；而 kubectl apply，则是执行了一个对原有 API 对象的 PATCH 操作。
+  - Istio 例子： https://github.com/kelseyhightower/kubernetes-initializer-tutorial
+    istio 使用了Kubernetes 的Dynamic Admission Control的功能: 在 Kubernetes 项目中，当一个 Pod 或者任何一个 API 对象被提交给 APIServer 之后，总有一些“初始化”性质的工作需要在它们被 Kubernetes 项目正式处理之前进行。比如，自动为所有 Pod 加上某些标签（Labels）。而这个“初始化”操作的实现，借助的是一个叫作 Admission 的功能。它其实是 Kubernetes 项目里一组被称为 Admission Controller 的代码，可以选择性地被编译进 APIServer 中，在 API 对象创建之后会被立刻调用到。但这就意味着，如果你现在想要添加一些自己的规则到 Admission Controller，就会比较困难。因为，这要求重新编译并重启 APIServer。显然，这种使用方法对 Istio 来说，影响太大了。所以，Kubernetes 项目为我们额外提供了一种“热插拔”式的 Admission 机制，它就是 Dynamic Admission Control，也叫作：Initializer。
+    首先，Istio 会将这个 Envoy 容器本身的定义，以 ConfigMap 的方式保存在 Kubernetes 当中。接下来，Istio 将一个编写好的 Initializer，作为一个 Pod 部署在 Kubernetes 中。Kubernetes 的 API 库，为我们提供了一个方法，使得我们可以直接使用新旧两个 Pod 对象，生成一个 TwoWayMergePatch. 有了这个 TwoWayMergePatch 之后，Initializer 的代码就可以使用这个 patch 的数据，调用 Kubernetes 的 Client，发起一个 PATCH 请求。这也就意味着，当你在 Initializer 里完成了要做的操作后，一定要记得将这个 metadata.initializers.pending 标志清除掉。这一点，你在编写 Initializer 代码的时候一定要非常注意。Istio 项目的核心，就是由无数个运行在应用 Pod 中的 Envoy 容器组成的服务代理网格。
+  - 声明式 API，才是 Kubernetes 项目编排能力“赖以生存”的核心所在
+  - 工作原理：
+      - 首先，当我们发起了创建 CronJob 的 POST 请求之后，我们编写的 YAML 的信息就被提交给了 APIServer。而 APIServer 的第一个功能，就是过滤这个请求，并完成一些前置性的工作，比如授权、超时处理、审计等。
+      - 然后，请求会进入 MUX 和 Routes 流程。如果你编写过 Web Server 的话就会知道，MUX 和 Routes 是 APIServer 完成 URL 和 Handler 绑定的场所。而 APIServer 的 Handler 要做的事情，就是按照我刚刚介绍的匹配过程，找到对应的 CronJob 类型定义。
+      - 接着，APIServer 最重要的职责就来了：根据这个 CronJob 类型定义，使用用户提交的 YAML 文件里的字段，创建一个 CronJob 对象。而在这个过程中，APIServer 会进行一个 Convert 工作，即：把用户提交的 YAML 文件，转换成一个叫作 Super Version 的对象，它正是该 API 资源类型所有版本的字段全集。这样用户提交的不同版本的 YAML 文件，就都可以用这个 Super Version 对象来进行处理了。
+      - 接下来，APIServer 会先后进行 Admission() 和 Validation() 操作。比如，我在上一篇文章中提到的 Admission Controller 和 Initializer，就都属于 Admission 的内容。而 Validation，则负责验证这个对象里的各个字段是否合法。
+      - 这个被验证过的 API 对象，都保存在了 APIServer 里一个叫作 Registry 的数据结构中。也就是说，只要一个 API 对象的定义能在 Registry 里查到，它就是一个有效的 Kubernetes API 对象。
+      - 最后，APIServer 会把验证过的 API 对象转换成用户最初提交的版本，进行序列化操作，并调用 Etcd 的 API 把它保存起来。由此可见，声明式 API 对于 Kubernetes 来说非常重要。所以，APIServer 这样一个在其他项目里“平淡无奇”的组件，却成了 Kubernetes 项目的重中之重。
+  - Note: ！编写自定义控制器很有意思，但是提供的代码版本过低，感觉和考试关系没有那么大，但是以后有机会要学习。 https://github.com/trstringer/k8s-controller-custom-resource
+
+- RABC (Role-based Access Control)
+  - 基本概念
+    Role：角色，它其实是一组规则，定义了一组对 Kubernetes API 对象的操作权限。
+    Subject：被作用者，既可以是“人”，也可以是“机器”，也可以是你在 Kubernetes 里定义的“用户”。
+    RoleBinding：定义了“被作用者”和“角色”的绑定关系。
+  - Role
+    ```
+    kind: Role
+    apiVersion: rbac.authorization.k8s.io/v1
+    metadata:
+      namespace: mynamespace
+      name: example-role
+    rules:
+    - apiGroups: [""]
+      resources: ["pods"]
+      verbs: ["get", "watch", "list"]
+    ```
+    这个 Role 对象指定了它能产生作用的 Namepace 是：mynamespace。Namespace 是 Kubernetes 项目里的一个逻辑管理单位。不同 Namespace 的 API 对象，在通过 kubectl 命令进行操作的时候，是互相隔离开的。比如，kubectl get pods -n mynamespace。
+    这个 Role 对象的 rules 字段，就是它所定义的权限规则。在上面的例子里，这条规则的含义就是：允许“被作用者”，对 mynamespace 下面的 Pod 对象，进行 GET、WATCH 和 LIST 操作。
+  - RoleBinding (指定具体的被作用者)
+    ```
+    kind: RoleBinding
+    apiVersion: rbac.authorization.k8s.io/v1
+    metadata:
+      name: example-rolebinding
+      namespace: mynamespace
+    subjects:
+    - kind: User
+      name: example-user
+      apiGroup: rbac.authorization.k8s.io
+    roleRef:
+      kind: Role
+      name: example-role
+      apiGroup: rbac.authorization.k8s.io
+    ```
+  - Role 和 RoleBinding 对象都是 Namespaced 对象（Namespaced Object），它们对权限的限制规则仅在它们自己的 Namespace 内有效，roleRef 也只能引用当前 Namespace 里的 Role 对象。
+    对于非 Namespaced（Non-namespaced）对象（比如：Node），或者，某一个 Role 想要作用于所有的 Namespace 的时候, 我们就必须要使用 ClusterRole 和 ClusterRoleBinding 这两个组合了。这两个 API 对象的用法跟 Role 和 RoleBinding 完全一样。只不过，它们的定义里，没有了 Namespace 字段。
+  - 在 Role 或者 ClusterRole 里面，如果要赋予用户 example-user 所有权限，那你就可以给它指定一个 verbs 字段的全集，如下所示： `verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]`
+  - Role 对象的 rules 字段也可以进一步细化。比如，你可以只针对某一个具体的对象进行权限设置 
+    ```
+    rules:
+    - apiGroups: [""]
+      resources: ["configmaps"]
+      resourceNames: ["my-config"]
+      verbs: ["get"]
+    ```
+    这个例子就表示，这条规则的“被作用者”，只对名叫“my-config”的 ConfigMap 对象，有进行 GET 操作的权限。
+  - 在大多数时候，我们其实都不太使用“用户”这个功能，而是直接使用 Kubernetes 里的“内置用户”。这个由 Kubernetes 负责管理的“内置用户”，正是我们前面曾经提到过的：ServiceAccount。
+    ```
+    kind: RoleBinding
+    apiVersion: rbac.authorization.k8s.io/v1
+    metadata:
+      name: example-rolebinding
+      namespace: mynamespace
+    subjects:
+    - kind: ServiceAccount
+      name: example-sa
+      namespace: mynamespace
+    roleRef:
+      kind: Role
+      name: example-role
+      apiGroup: rbac.authorization.k8s.io
+    ```
+  Kubernetes 还拥有“用户组”（Group）的概念，也就是一组“用户”的意思。
+  实际上，一个 ServiceAccount，在 Kubernetes 里对应的“用户”的名字是： `system:serviceaccount:<Namespace名字>:<ServiceAccount名字>`而它对应的内置“用户组”的名字，就是：`
+system:serviceaccounts:<Namespace名字>`
+- 在 RoleBinding 里定义如下的 subjects：
+  ```
+  subjects:
+  - kind: Group
+    name: system:serviceaccounts:mynamespace
+    apiGroup: rbac.authorization.k8s.io
+  ```
+  这就意味着这个 Role 的权限规则，作用于 mynamespace 里的所有 ServiceAccount。这就用到了“用户组”的概念。
+- 在 Kubernetes 中已经内置了很多个为系统保留的 ClusterRole，它们的名字都以 system: 开头。你可以通过 kubectl get clusterroles 查看到它们。
+
+- Kubernetes 还提供了四个预先定义好的 ClusterRole 来供用户直接使用：cluster-admin；admin；edit；view。
+- cluster-admin 角色，对应的是整个 Kubernetes 项目中的最高权限（verbs=*），如下所示：
+  ```
+  $ kubectl describe clusterrole cluster-admin -n kube-system
+  Name:         cluster-admin
+  Labels:       kubernetes.io/bootstrapping=rbac-defaults
+  Annotations:  rbac.authorization.kubernetes.io/autoupdate=true
+  PolicyRule:
+    Resources  Non-Resource URLs Resource Names  Verbs
+    ---------  -----------------  --------------  -----
+    *.*        []                 []              [*]
+              [*]                []              [*]
+  ```
