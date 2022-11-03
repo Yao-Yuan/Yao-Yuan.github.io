@@ -1,7 +1,7 @@
 ---
 layout: post
 title:  "Kubenetes Learning"
-date:   2022-10-16 21:02:00 +0200
+date:   2022-11-03 21:02:00 +0200
 categories: jekyll update
 ---
 
@@ -909,3 +909,4 @@ system:serviceaccounts:<Namespace名字>`
     *.*        []                 []              [*]
               [*]                []              [*]
   ```
+- etcd operator的工作原理。 没有特别看懂， 以后可以再仔细对着源码看看 https://github.com/coreos/etcd-operator
