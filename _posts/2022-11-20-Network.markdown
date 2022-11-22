@@ -1,0 +1,14 @@
+---
+layout: post
+title:  "OSI Network Model"
+date:   2022-11-20 03:14:00 +0200
+categories: jekyll update
+---
+OSI (Open Systems Interconnection) model defines a networking framework to implement protocols in layers, with control passed from one layer to the next.
+1. Physical Layer - 传输digital data bits (例如通过网线或者网关ethernet hubs)
+2. Data Link Layer （数据链路层）. Obtaining data from physical layer and checks for physical transmission errors and packages bits into data frames. It also manages physical addressing schemes such as MAC addresses, controlling access of network devices to the physical medium. 最复杂的一层：再分为Media Access Control 和 Logical Link Control 的sub-layer
+3. Network Layer. 在Data link layer上加上路由功能。如果判断frame到达终点则把数据打包成packets送给transport layer, 若没有，则更新终点地址，将frame推回更低的层。这一层维护逻辑地址 (e.g. IP adderss) 以及逻辑地址和物理地址的地址映射。
+4. Transport Layer. 这一层deliver data across network connections (比如 TCP - transmission control protocol 和 UDP - user datagram protocol)
+5. Session Layer. 管理数据事件和数据序列（开启和终止链接）。支持多种链接方式。
+6. Presentation Layer. 数据处理，例如格式转换，加密解密。
+7. Application Layer. 为用户提供服务，并且从presentation layer读取并且供给数据。

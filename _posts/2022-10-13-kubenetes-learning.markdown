@@ -910,3 +910,138 @@ system:serviceaccounts:<Namespace名字>`
               [*]                []              [*]
   ```
 - etcd operator的工作原理。 没有特别看懂， 以后可以再仔细对着源码看看 https://github.com/coreos/etcd-operator
+
+- Kubernetes 容器持久化存储
+  - PV: persistent volume 是持久化存储数据卷。这个 API 对象主要定义的是一个持久化存储在宿主机上的目录，比如一个 NFS 的挂载目录。
+  - PVC: persisten volume claim 是 Pod 所希望使用的持久化存储的属性
+  - 而用户创建的 PVC 要真正被容器使用起来，就必须先和某个符合条件的 PV 进行绑定。这里要检查的条件，包括两部分：第一个条件，当然是 PV 和 PVC 的 spec 字段。比如，PV 的存储（storage）大小，就必须满足 PVC 的要求。而第二个条件，则是 PV 和 PVC 的 storageClassName 字段必须一样。
+  - PersistentVolumeController 会不断地查看当前每一个 PVC，是不是已经处于 Bound（已绑定）状态。如果不是，那它就会遍历所有的、可用的 PV，并尝试将其与这个“单身”的 PVC 进行绑定。这样，Kubernetes 就可以保证用户提交的每一个 PVC，只要有合适的 PV 出现，它就能够很快进入绑定状态. 而所谓将一个 PV 与 PVC 进行“绑定”，其实就是将这个 PV 对象的名字，填在了 PVC 对象的 spec.volumeName 字段上。所以，接下来 Kubernetes 只要获取到这个 PVC 对象，就一定能够找到它所绑定的 PV。
+  - StorageClass (创建PV的模板) - Kubernetes 为我们提供了一套可以自动创建 PV 的机制，即：Dynamic Provisioning。
+    StorageClass 对象会定义如下两个部分内容：第一，PV 的属性。比如，存储类型、Volume 的大小等等。第二，创建这种 PV 需要用到的存储插件。比如，Ceph 等等。Kubernetes 就能够根据用户提交的 PVC，找到一个对应的 StorageClass 了。然后，Kubernetes 就会调用该 StorageClass 声明的存储插件，创建出需要的 PV。
+    创建StorageClass然后再声明一个PVC用这个Storage Class, 以 Google Cloud 为例。当我们通过 kubectl create 创建上述 PVC 对象之后，Kubernetes 就会调用 Google Cloud 的 API，创建出一块 SSD 格式的 Persistent Disk。然后，再使用这个 Persistent Disk 的信息，自动创建出一个对应的 PV 对象。
+
+- Kubernetes 容器网络
+  - 在默认情况下，被限制在 Network Namespace 里的容器进程，实际上是通过 Veth Pair 设备 + 宿主机网桥的方式，实现了跟同其他容器的数据交换。 
+  ！[container-network](./container-network.jpg)
+  - iptable 的跟踪功能查看数据包的传输过程：
+    ```
+    # 在宿主机上执行
+    $ iptables -t raw -A OUTPUT -p icmp -j TRACE
+    $ iptables -t raw -A PREROUTING -p icmp -j TRACE
+    ```
+  - 当你遇到容器连不通“外网”的时候，你都应该先试试 docker0 网桥能不能 ping 通，然后查看一下跟 docker0 和 Veth Pair 设备相关的 iptables 规则是不是有异常，往往就能够找到问题的答案了。
+  - CNI 工作原理，有些复杂，没有认真看完，之后有需要再细读
+  - Service
+    - `kubectl get endpoints hostnames` 可以找到service 对应的pod IP 地址。只有处于运行状态，并且readiness probe检查通过的pod才会出现
+    - 通过VIP（virtual ip）可以访问代理po. `kubectl get svc hostnames`. curl 返回的ip地址，可以看到会返回不同的pod的hostname。 service 提供的是round robin 的负载均衡方式
+    - 当我们创建一个servie的时候，宿主机就会多一条iptables规则：凡是目的地是这个service 的VIP，端口是80的IP包，都应该跳转到另外一条叫做KUBE-SVC-XXXX的iptables链进行处理。而这个SVC的规则，则是一组规则的集合，是一组随机模式的iptables链，最终目的地是这个service代理的pods。这一组规则就是service实现负载均衡的位置。需要注意的是，iptables 规则的匹配是从上到下逐条进行的，所以为了保证上述三条规则每条被选中的概率都相同，我们应该将它们的 probability 字段的值分别设置为 1/3（0.333…）、1/2 和 1。第一条规则被选中的概率就是 1/3；而如果第一条规则没有被选中，那么这时候就只剩下两条规则了，所以第二条规则的 probability 就必须设置为 1/2；类似地，最后一条就必须设置为 1。
+    - 当你的宿主机上有大量 Pod 的时候，成百上千条 iptables 规则不断地被刷新，会大量占用该宿主机的 CPU 资源，甚至会让宿主机“卡”在这个过程中。所以说，一直以来，基于 iptables 的 Service 实现，都是制约 Kubernetes 项目承载更多量级的 Pod 的主要障碍。而 IPVS 模式的 Service，就是解决这个问题的一个行之有效的方法。kube-proxy 就会通过 Linux 的 IPVS 模块，为这个 IP 地址设置三个 IPVS 虚拟主机，并设置这三个虚拟主机之间使用轮询模式 (rr) 来作为负载均衡策略。我们可以通过 ipvsadm 查看到这个设置，`ipvsad -ln`. 任何发往 10.102.128.4:80 的请求，就都会被 IPVS 模块转发到某一个后端 Pod 上了。而相比于 iptables，IPVS 在内核中的实现其实也是基于 Netfilter 的 NAT 模式，所以在转发这一层上，理论上 IPVS 并没有显著的性能提升。但是，IPVS 并不需要在宿主机上为每个 Pod 设置 iptables 规则，而是把对这些“规则”的处理放到了内核态，从而极大地降低了维护这些规则的代价。这也正印证了我在前面提到过的，“将重要操作放入内核态”是提高性能的重要手段。不过需要注意的是，IPVS 模块只负责上述的负载均衡和代理功能。而一个完整的 Service 流程正常工作所需要的包过滤、SNAT 等操作，还是要靠 iptables 来实现。。在大规模集群里，我非常建议你为 kube-proxy 设置–proxy-mode=ipvs 来开启这个功能。它为 Kubernetes 集群规模带来的提升，还是非常巨大的。
+  - DNS
+    - 对于 ClusterIP 模式的 Service 来说（比如我们上面的例子），它的 A 记录的格式是：..svc.cluster.local。当你访问这条 A 记录的时候，它解析到的就是该 Service 的 VIP 地址。
+    - 而对于指定了 clusterIP=None 的 Headless Service 来说，它的 A 记录的格式也是：..svc.cluster.local。但是，当你访问这条 A 记录的时候，它返回的是所有被代理的 Pod 的 IP 地址的集合。当然，如果你的客户端没办法解析这个集合的话，它可能会只会拿到第一个 Pod 的 IP 地址。
+    - 在 Kubernetes 里，/etc/hosts 文件是单独挂载的，这也是为什么 kubelet 能够对 hostname 进行修改并且 Pod 重建后依然有效的原因。这跟 Docker 的 Init 层是一个原理。
+ - 从外界访问serice
+  - 1. 用NodePort
+    ```
+    apiVersion: v1
+    kind: Service
+    metadata:
+      name: my-nginx
+      labels:
+        run: my-nginx
+    spec:
+      type: NodePort
+      ports:
+      - nodePort: 8080
+        targetPort: 80
+        protocol: TCP
+        name: http
+      - nodePort: 443
+        protocol: TCP
+        name: https
+      selector:
+        run: my-nginx
+    ```
+    要访问这个 Service，你只需要访问：<任何一台宿主机的IP地址>:8080 就可以访问到某一个被代理的 Pod 的 80 端口了。
+
+  - 2. LoadBalancer
+      ```
+      ---
+      kind: Service
+      apiVersion: v1
+      metadata:
+        name: example-service
+      spec:
+        ports:
+        - port: 8765
+          targetPort: 9376
+        selector:
+          app: example
+        type: LoadBalancer
+      ```
+  - 3. ExternalName
+      ```
+
+      kind: Service
+      apiVersion: v1
+      metadata:
+        name: my-service
+      spec:
+        type: ExternalName
+        externalName: my.database.example.com
+      ```
+      当你通过 Service 的 DNS 名字访问它的时候，比如访问：my-service.default.svc.cluster.local。那么，Kubernetes 为你返回的就是my.database.example.com。所以说，ExternalName 类型的 Service，其实是在 kube-dns 里为你添加了一条 CNAME 记录。这时，访问 my-service.default.svc.cluster.local 就和访问 my.database.example.com 这个域名是一个效果了。
+  - debug service
+      - 当你的 Service 没办法通过 DNS 访问到的时候。你就需要区分到底是 Service 本身的配置问题，还是集群的 DNS 出了问题。一个行之有效的方法，就是检查 Kubernetes 自己的 Master 节点的 Service DNS 是否正常: nslookup kubernetes.default 如果上面访问 kubernetes.default 返回的值都有问题，那你就需要检查 kube-dns 的运行状态和日志了。否则的话，你应该去检查自己的 Service 定义是不是有问题。
+      - 如果你的 Service 没办法通过 ClusterIP 访问到的时候，你首先应该检查的是这个 Service 是否有 Endpoints. `kubectl get endpoints hostnames` 需要注意的是，如果你的 Pod 的 readniessProbe 没通过，它也不会出现在 Endpoints 列表里。
+      - 如果 Endpoints 正常，那么你就需要确认 kube-proxy 是否在正确运行。
+      - 如果 kube-proxy 一切正常，你就应该仔细查看宿主机上的 iptables 了:
+        1. KUBE-SERVICES 或者 KUBE-NODEPORTS 规则对应的 Service 的入口链，这个规则应该与 VIP 和 Service 端口一一对应；
+        2. KUBE-SEP-(hash) 规则对应的 DNAT 链，这些规则应该与 Endpoints 一一对应；
+        3. KUBE-SVC-(hash) 规则对应的负载均衡链，这些规则的数目应该与 Endpoints 数目一致；
+        4. 如果是 NodePort 模式的话，还有 POSTROUTING 处的 SNAT 链。
+- Ingress: Kubernetes 为我内置一个全局的负载均衡器。然后，通过我访问的 URL，把请求转发给不同的后端 Service。 这种全局的、为了代理不同后端 Service 而设置的负载均衡服务，就是 Kubernetes 里的 Ingress 服务。是Service 的Service.
+  - ```
+    apiVersion: extensions/v1beta1
+    kind: Ingress
+    metadata:
+      name: cafe-ingress
+    spec:
+      tls:
+      - hosts:
+        - cafe.example.com
+        secretName: cafe-secret
+      rules:
+      - host: cafe.example.com #IngressRule 的 Key，就叫做：host。它必须是一个标准的域名格式（Fully Qualified Domain Name）的字符串，而不能是 IP 地址。
+        http:
+          paths:
+          - path: /tea
+            backend:
+              serviceName: tea-svc
+              servicePort: 80
+          - path: /coffee
+            backend:
+              serviceName: coffee-svc
+              servicePort: 80
+    ```
+    而 host 字段定义的值，就是这个 Ingress 的入口。这也就意味着，当用户访问 cafe.example.com 的时候，实际上访问到的是这个 Ingress 对象。这样，Kubernetes 就能使用 IngressRule 来对你的请求进行下一步转发。
+
+- 资源模型和资源管理
+  1. 资源分为可压缩资源（例如CPU）和不可压缩资源（例如内存）。
+    - 可压缩资源不足时，Pod 会饥饿，不会退出
+    - 不可压缩资源不足，Pod 会因为Out of memory 被内核杀掉
+  2. CPU 可以写成 500m 带不了500 millicpu也就是半个cpu， 这样是推荐写法
+  3. 资源分为limits 和requests. 容器化作业在提交时所设置的资源边界，并不一定是调度系统所必须严格遵守的，这是因为在实际场景中，大多数作业使用到的资源其实远小于它所请求的资源限额。而 Kubernetes 的 requests+limits 的做法，其实就是上述思路的一个简化版：用户在提交 Pod 时，可以声明一个相对较小的 requests 值供调度器使用，而 Kubernetes 真正设置给容器 Cgroups 的，则是相对较大的 limits 值。不难看到，这跟 Borg 的思路相通的。
+  4. QoS (quailty of service) 模型
+    - requests = limits : Guaranteed
+    - limits > requests (不满足guaranteed 但至少有一个container设置了requests): Burstable
+    - 没有设置request or limits: BestEffort
+  5. Eviction（资源回收）：当宿主机不可压缩资源短缺时，会被出发。e.g. memory.availabe, nodefs.available, imagefs.availabe.
+    会有一个阈值，可以配置。同时有soft和hard 模式。soft模式是指触发条件达到一定的时间才会evicition, 而hard是立刻马上。
+    - 当evition的阈值达到后，node会进入MemoryPressure 或者DiskPressure的状态，新的Pod会被避免调度到这台宿主机上 （原理上是添加污点）
+    - Evition 顺序
+      1. BestEffort
+      2. Burstable, 并且发生饥饿的资源使用量超过了requests
+      3. Guaranteed, 使用超过Limits 或者宿主机在MemoryPressure
+  6. cpuset： 在使用容器的时候，你可以通过设置 cpuset 把容器绑定到某个 CPU 的核上，而不是像 cpushare 那样共享 CPU 的计算能力。
+      - 设置方式： 必须是Guranteed (limits = requests) 并且cpu 是整数
